@@ -1,0 +1,1 @@
+message("Building common tests")

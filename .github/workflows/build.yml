@@ -1,0 +1,149 @@
+# Set up a matrix combination to build and test the following 3 configurations:
+#
+# | OS             | Build Type | C Compiler | C++ Compiler |
+# |----------------|------------|------------|--------------|
+# | ubuntu-latest  | Release    | gcc        | g++          |
+# | ubuntu-latest  | Release    | clang      | clang++      |
+# | windows-latest | Release    | cl         | cl           |
+#
+# Excluded Combinations:
+# - windows-latest + gcc
+# - windows-latest + clang
+# - ubuntu-latest + cl
+
+name: Build, test and release
+
+on:
+  push:
+    branches: [master]
+    tags: [v*] # Tags that starts with "v"
+  pull_request:
+    branches: [master]
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: true
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+        build_type: [Release]
+        c_compiler: [gcc, clang, cl]
+        include:
+          - os: windows-latest
+            c_compiler: cl
+            cpp_compiler: cl
+          - os: ubuntu-latest
+            c_compiler: gcc
+            cpp_compiler: g++
+          - os: ubuntu-latest
+            c_compiler: clang
+            cpp_compiler: clang++
+        exclude:
+          - os: windows-latest
+            c_compiler: gcc
+          - os: windows-latest
+            c_compiler: clang
+          - os: ubuntu-latest
+            c_compiler: cl
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set workflow variables
+        id: strings
+        shell: bash
+        run: echo "build-output-dir=${{ github.workspace }}/build" >> "$GITHUB_OUTPUT"
+
+      - name: Configure CMake
+        run: >
+          cmake -B ${{ steps.strings.outputs.build-output-dir }}
+          -S ${{ github.workspace }}
+          -DCMAKE_CXX_COMPILER=${{ matrix.cpp_compiler }}
+          -DCMAKE_C_COMPILER=${{ matrix.c_compiler }}
+          -DCMAKE_BUILD_TYPE=${{ matrix.build_type }}
+
+      # Note that --config is needed because the default Windows generator is a multi-config
+      # generator (Visual Studio generator).
+      - name: Build
+        run: >
+          cmake --build ${{ steps.strings.outputs.build-output-dir }} --config ${{ matrix.build_type }}
+
+      # Note that --build-config is needed because the default Windows generator is a multi-config
+      # generator (Visual Studio generator).
+      - name: Test
+        working-directory: ${{ steps.strings.outputs.build-output-dir }}
+        run: >
+          ctest --build-config ${{ matrix.build_type }} --test-dir ${{ steps.strings.outputs.build-output-dir }}/tests
+          --output-on-failure --verbose
+
+      - name: Upload Build Artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: build-${{ matrix.os }}-${{ matrix.c_compiler }}
+          path: ${{ steps.strings.outputs.build-output-dir }}
+          retention-days: 3
+
+  release:
+    # Runs only tag push
+    if: github.ref_type == 'tag'
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Get Tag Name
+        run: echo "TAG_NAME=${GITHUB_REF#refs/tags/}" >> "$GITHUB_ENV"
+
+      - name: Create GitHub Release
+        id: create_release
+        uses: actions/create-release@v1
+        with:
+          tag_name: ${{ env.TAG_NAME }}
+          release_name: Release ${{ env.TAG_NAME }}
+          draft: false
+          prerelease: false
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Download all build artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+
+      - name: Prepare and Upload Binaries
+        run: |
+          # Define paths to binaries
+          LINUX_CLANG="artifacts/build-ubuntu-latest-clang/project"
+          LINUX_GCC="artifacts/build-ubuntu-latest-gcc/project"
+          WINDOWS_CL="artifacts/build-windows-latest-cl/Release/project.exe"
+
+          # Ensure binaries exist before renaming
+          if [[ -f "$LINUX_CLANG" ]]; then
+            mv "$LINUX_CLANG" "cpp-template-linux-clang"
+            echo "Uploading cpp-template-linux-clang"
+            gh release upload ${{ env.TAG_NAME }} "cpp-template-linux-clang" --clobber
+          else
+            echo "❌ Linux Clang binary not found!"
+          fi
+          if [[ -f "$LINUX_GCC" ]]; then
+            mv "$LINUX_GCC" "cpp-template-linux-gcc"
+            echo "Uploading cpp-template-linux-gcc"
+            gh release upload ${{ env.TAG_NAME }} "cpp-template-linux-gcc" --clobber
+          else
+            echo "❌ Linux GCC binary not found!"
+          fi
+          if [[ -f "$WINDOWS_CL" ]]; then
+            mv "$WINDOWS_CL" "cpp-template-windows-cl.exe"
+            echo "Uploading cpp-template-windows-cl.exe"
+            gh release upload ${{ env.TAG_NAME }} "cpp-template-windows-cl.exe" --clobber
+          else
+            echo "❌ Windows CL binary not found!"
+          fi
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      # Debug step to check the artifacts are there
+      # - name: List Available Artifacts
+      #   run: ls -R ${{ github.workspace }}
